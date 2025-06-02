@@ -1392,12 +1392,30 @@ static int tiff_decode_tag(TiffContext *s, AVFrame *frame)
             }
             s->strippos = 0;
             s->stripoff = value;
-        } else
+        } else {
+            if (bytestream2_size(&s->gb)-1 < off) {
+                av_log(s->avctx, AV_LOG_ERROR,
+                    "Start offset 0x%x of stripOffsets (tag 0x%x) goes to file out-of-bounds.\n", off, TIFF_STRIP_OFFS);
+                return AVERROR_INVALIDDATA;
+            }
+            if (bytestream2_size(&s->gb) < (off+type_sizes[type]*count)) {
+                av_log(s->avctx, AV_LOG_ERROR,
+                    "End offset 0x%x of stripOffsets (tag 0x%x) goes to file out-of-bounds.\n", off+type_sizes[type]*count-1, TIFF_STRIP_OFFS);
+                return AVERROR_INVALIDDATA;
+            }
             s->strippos = off;
+        }
         s->strips = count;
         if (s->strips == 1)
             s->rps = s->height;
         s->sot = type;
+        break;
+    case TIFF_ORIENTATION:
+        if (value != 1) {
+            av_log(s->avctx, AV_LOG_ERROR,
+                   "Unsupported orientation (tag 0x%x) value %d\n", TIFF_ORIENTATION, value);
+            return AVERROR_INVALIDDATA;
+        }
         break;
     case TIFF_STRIP_SIZE:
         if (count == 1) {
@@ -1410,6 +1428,16 @@ static int tiff_decode_tag(TiffContext *s, AVFrame *frame)
             s->stripsize     = value;
             s->strips        = 1;
         } else {
+            if (bytestream2_size(&s->gb)-1 < off) {
+                av_log(s->avctx, AV_LOG_ERROR,
+                    "Start offset 0x%x of stripByteCounts (tag 0x%x) goes to file out-of-bounds.\n", off, TIFF_STRIP_SIZE);
+                return AVERROR_INVALIDDATA;
+            }
+            if (bytestream2_size(&s->gb) < (off+type_sizes[type]*count)) {
+                av_log(s->avctx, AV_LOG_ERROR,
+                    "End offset 0x%x of stripByteCounts (tag 0x%x) goes to file out-of-bounds.\n", off+type_sizes[type]*count-1, TIFF_STRIP_SIZE);
+                return AVERROR_INVALIDDATA;
+            }
             s->stripsizesoff = off;
         }
         s->strips = count;
@@ -1718,6 +1746,13 @@ static int tiff_decode_tag(TiffContext *s, AVFrame *frame)
     case TIFF_PAGE_NAME:
         ADD_METADATA(count, "page_name", NULL);
         break;
+    case TIFF_RES_UNIT:
+        if ((value < 1 || value > 3) && (s->avctx->err_recognition & AV_EF_EXPLODE)) {
+            av_log(s->avctx, AV_LOG_ERROR,
+                   "Invalid resolutionUnit (tag 0x%x) value %d\n", TIFF_RES_UNIT, value);
+            return AVERROR_INVALIDDATA;
+        }
+        break;
     case TIFF_PAGE_NUMBER:
         ADD_METADATA(count, "page_number", " / ");
         // need to seek back to re-read the page number
@@ -1826,6 +1861,8 @@ again:
     bytestream2_seek(&s->gb, off, SEEK_SET);
     entries = ff_tget_short(&s->gb, le);
     if (bytestream2_get_bytes_left(&s->gb) < entries * 12)
+        return AVERROR_INVALIDDATA;
+    if ((bytestream2_get_bytes_left(&s->gb) < entries * 12 + 4) && (avctx->err_recognition & AV_EF_EXPLODE))
         return AVERROR_INVALIDDATA;
     for (i = 0; i < entries; i++) {
         if ((ret = tiff_decode_tag(s, p)) < 0)
